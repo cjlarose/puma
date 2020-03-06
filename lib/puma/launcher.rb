@@ -75,8 +75,6 @@ module Puma
 
       Dir.chdir(@restart_dir)
 
-      ENV["BUNDLER_ORIG_ORIG_BUNDLE_GEMFILE"] ||= ENV["BUNDLER_ORIG_BUNDLE_GEMFILE"]
-
       prune_bundler if prune_bundler?
 
       @environment = @options[:environment] if @options[:environment]
@@ -300,7 +298,7 @@ module Puma
 
       log '* Pruning Bundler environment'
       home = ENV['GEM_HOME']
-      bundle_gemfile = ENV['BUNDLER_ORIG_ORIG_BUNDLE_GEMFILE']
+      bundle_gemfile = ENV['BUNDLER_ORIG_BUNDLE_GEMFILE']
       bundle_gemfile = nil if bundle_gemfile == 'BUNDLER_ENVIRONMENT_PRESERVER_INTENTIONALLY_NIL'
       Bundler.with_clean_env do
         ENV['GEM_HOME'] = home
