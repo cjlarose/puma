@@ -3,6 +3,7 @@
 require 'puma/runner'
 require 'puma/util'
 require 'puma/plugin'
+require 'puma/worker_generator'
 
 require 'time'
 
@@ -23,209 +24,59 @@ module Puma
       super cli, events
 
       @phase = 0
-      @workers = []
-      @next_check = nil
 
       @phased_state = :idle
       @phased_restart = false
     end
 
-    def stop_workers
-      log "- Gracefully shutting down workers..."
-      @workers.each { |x| x.term }
+    def stop_worker_generators
+      # TODO: kill with SIGKILL eventually
+      if @current_worker_generator_pid
+        Process.kill 'TERM', @current_worker_generator_pid
+      end
+      if @next_worker_generator_pid
+        Process.kill 'TERM', @next_worker_generator_pid
+      end
 
       begin
         loop do
-          wait_workers
-          break if @workers.empty?
+          wait_worker_generators
+          break if @current_worker_generator_pid.nil? && @next_worker_generator_pid.nil?
           sleep 0.2
         end
       rescue Interrupt
-        log "! Cancelled waiting for workers"
+        log "! Cancelled waiting for worker generators"
       end
     end
 
     def start_phased_restart
       @phase += 1
       log "- Starting phased worker restart, phase: #{@phase}"
-
-      # Be sure to change the directory again before loading
-      # the app. This way we can pick up new code.
-      dir = @launcher.restart_dir
-      log "+ Changing to #{dir}"
-      Dir.chdir dir
     end
 
     def redirect_io
       super
 
-      @workers.each { |x| x.hup }
+      # TODO send HUP to all stem cells
     end
 
-    class Worker
-      def initialize(idx, pid, phase, options)
-        @index = idx
-        @pid = pid
-        @phase = phase
-        @stage = :started
-        @signal = "TERM"
-        @options = options
-        @first_term_sent = nil
-        @started_at = Time.now
-        @last_checkin = Time.now
-        @last_status = {}
-        @term = false
+    def spawn_initial_worker_generator
+      @current_worker_generator = WorkerGenerator.new phase: @phase,
+                                                      num_desired_workers: @options[:workers],
+                                                      options: @options,
+                                                      launcher: @launcher,
+                                                      events: @events
+      pid = fork { @current_worker_generator.run }
+
+      if !pid
+        log "! Complete inability to spawn new worker generator detected"
+        log "! Seppuku is the only choice."
+        exit! 1
       end
 
-      attr_reader :index, :pid, :phase, :signal, :last_checkin, :last_status, :started_at
+      debug "Spawned worker generator: #{pid}"
 
-      def booted?
-        @stage == :booted
-      end
-
-      def boot!
-        @last_checkin = Time.now
-        @stage = :booted
-      end
-
-      def term?
-        @term
-      end
-
-      def ping!(status)
-        @last_checkin = Time.now
-        captures = status.match(/{ "backlog":(?<backlog>\d*), "running":(?<running>\d*), "pool_capacity":(?<pool_capacity>\d*), "max_threads": (?<max_threads>\d*), "requests_count": (?<requests_count>\d*) }/)
-        @last_status = captures.names.inject({}) do |hash, key|
-          hash[key.to_sym] = captures[key].to_i
-          hash
-        end
-      end
-
-      def ping_timeout?(which)
-        Time.now - @last_checkin > which
-      end
-
-      def term
-        begin
-          if @first_term_sent && (Time.now - @first_term_sent) > @options[:worker_shutdown_timeout]
-            @signal = "KILL"
-          else
-            @term ||= true
-            @first_term_sent ||= Time.now
-          end
-          Process.kill @signal, @pid
-        rescue Errno::ESRCH
-        end
-      end
-
-      def kill
-        Process.kill "KILL", @pid
-      rescue Errno::ESRCH
-      end
-
-      def hup
-        Process.kill "HUP", @pid
-      rescue Errno::ESRCH
-      end
-    end
-
-    def spawn_workers
-      diff = @options[:workers] - @workers.size
-      return if diff < 1
-
-      master = Process.pid
-
-      diff.times do
-        idx = next_worker_index
-        @launcher.config.run_hooks :before_worker_fork, idx
-
-        pid = fork { worker(idx, master) }
-        if !pid
-          log "! Complete inability to spawn new workers detected"
-          log "! Seppuku is the only choice."
-          exit! 1
-        end
-
-        debug "Spawned worker: #{pid}"
-        @workers << Worker.new(idx, pid, @phase, @options)
-
-        @launcher.config.run_hooks :after_worker_fork, idx
-      end
-
-      if diff > 0
-        @phased_state = :idle
-      end
-    end
-
-    def cull_workers
-      diff = @workers.size - @options[:workers]
-      return if diff < 1
-
-      debug "Culling #{diff.inspect} workers"
-
-      workers_to_cull = @workers[-diff,diff]
-      debug "Workers to cull: #{workers_to_cull.inspect}"
-
-      workers_to_cull.each do |worker|
-        log "- Worker #{worker.index} (pid: #{worker.pid}) terminating"
-        worker.term
-      end
-    end
-
-    def next_worker_index
-      all_positions =  0...@options[:workers]
-      occupied_positions = @workers.map { |w| w.index }
-      available_positions = all_positions.to_a - occupied_positions
-      available_positions.first
-    end
-
-    def all_workers_booted?
-      @workers.count { |w| !w.booted? } == 0
-    end
-
-    def check_workers(force=false)
-      return if !force && @next_check && @next_check >= Time.now
-
-      @next_check = Time.now + Const::WORKER_CHECK_INTERVAL
-
-      any = false
-
-      @workers.each do |w|
-        next if !w.booted? && !w.ping_timeout?(@options[:worker_boot_timeout])
-        if w.ping_timeout?(@options[:worker_timeout])
-          log "! Terminating timed out worker: #{w.pid}"
-          w.kill
-          any = true
-        end
-      end
-
-      # If we killed any timed out workers, try to catch them
-      # during this loop by giving the kernel time to kill them.
-      sleep 1 if any
-
-      wait_workers
-      cull_workers
-      spawn_workers
-
-      if all_workers_booted?
-        # If we're running at proper capacity, check to see if
-        # we need to phase any workers out (which will restart
-        # in the right phase).
-        #
-        w = @workers.find { |x| x.phase != @phase }
-
-        if w
-          if @phased_state == :idle
-            @phased_state = :waiting
-            log "- Stopping #{w.pid} for phased upgrade..."
-          end
-
-          unless w.term?
-            w.term
-            log "- #{w.signal} sent to #{w.pid}..."
-          end
-        end
-      end
+      @current_worker_generator_pid = pid
     end
 
     def wakeup!
@@ -236,84 +87,6 @@ module Puma
       rescue SystemCallError, IOError
         Thread.current.purge_interrupt_queue if Thread.current.respond_to? :purge_interrupt_queue
       end
-    end
-
-    def worker(index, master)
-      title  = "puma: cluster worker #{index}: #{master}"
-      title += " [#{@options[:tag]}]" if @options[:tag] && !@options[:tag].empty?
-      $0 = title
-
-      Signal.trap "SIGINT", "IGNORE"
-
-      @workers = []
-      @master_read.close
-      @suicide_pipe.close
-
-      Thread.new do
-        Puma.set_thread_name "worker check pipe"
-        IO.select [@check_pipe]
-        log "! Detected parent died, dying"
-        exit! 1
-      end
-
-      # If we're not running under a Bundler context, then
-      # report the info about the context we will be using
-      if !ENV['BUNDLE_GEMFILE']
-        if File.exist?("Gemfile")
-          log "+ Gemfile in context: #{File.expand_path("Gemfile")}"
-        elsif File.exist?("gems.rb")
-          log "+ Gemfile in context: #{File.expand_path("gems.rb")}"
-        end
-      end
-
-      # Invoke any worker boot hooks so they can get
-      # things in shape before booting the app.
-      @launcher.config.run_hooks :before_worker_boot, index
-
-      server = start_server
-
-      Signal.trap "SIGTERM" do
-        @worker_write << "e#{Process.pid}\n" rescue nil
-        server.stop
-      end
-
-      begin
-        @worker_write << "b#{Process.pid}\n"
-      rescue SystemCallError, IOError
-        Thread.current.purge_interrupt_queue if Thread.current.respond_to? :purge_interrupt_queue
-        STDERR.puts "Master seems to have exited, exiting."
-        return
-      end
-
-      Thread.new(@worker_write) do |io|
-        Puma.set_thread_name "stat payload"
-        base_payload = "p#{Process.pid}"
-
-        while true
-          sleep Const::WORKER_CHECK_INTERVAL
-          begin
-            b = server.backlog || 0
-            r = server.running || 0
-            t = server.pool_capacity || 0
-            m = server.max_threads || 0
-            rc = server.requests_count || 0
-            payload = %Q!#{base_payload}{ "backlog":#{b}, "running":#{r}, "pool_capacity":#{t}, "max_threads": #{m}, "requests_count": #{rc} }\n!
-            io << payload
-          rescue IOError
-            Thread.current.purge_interrupt_queue if Thread.current.respond_to? :purge_interrupt_queue
-            break
-          end
-        end
-      end
-
-      server.run.join
-
-      # Invoke any worker shutdown hooks so they can prevent the worker
-      # exiting until any background operations are completed
-      @launcher.config.run_hooks :before_worker_shutdown, index
-    ensure
-      @worker_write << "t#{Process.pid}\n" rescue nil
-      @worker_write.close
     end
 
     def restart
@@ -379,10 +152,6 @@ module Puma
       }
     end
 
-    def preload?
-      @options[:preload_app]
-    end
-
     # We do this in a separate method to keep the lambda scope
     # of the signals handlers as small as possible.
     def setup_signals
@@ -412,13 +181,64 @@ module Puma
         else
           @launcher.close_binder_listeners
 
-          stop_workers
+          stop_worker_generators
           stop
 
           raise(SignalException, "SIGTERM") if @options[:raise_exception_on_sigterm]
           exit 0 # Clean exit, workers were stopped
         end
       end
+    end
+
+    def check_worker_generators(force=false)
+      return if !force && @next_check && @next_check >= Time.now
+
+      @next_check = Time.now + Const::WORKER_CHECK_INTERVAL
+
+      if @phase != @current_worker_generator.phase
+        if @current_worker_generator.num_desired_workers == 0 && @next_worker_generator.num_desired_workers == @options[:workers]
+          log 'killing current worker generator, swapping'
+          Process.kill 'TERM', @current_worker_generator_pid
+        else
+          new_workers = if @next_worker_generator
+                          @next_worker_generator.num_desired_workers
+                        else
+                          0
+                        end
+          total_workers = @current_worker_generator.num_desired_workers + new_workers
+
+          if total_workers >= @options[:workers]
+            log 'decreasing number of desired workers on current worker generator'
+            @current_worker_generator.num_desired_workers -= 1
+            Process.kill 'TTOU', @current_worker_generator_pid
+          else
+            log 'increasing number of desired workers on new worker generator'
+            if @next_worker_generator_pid
+              @next_worker_generator.num_desired_workers += 1
+              Process.kill 'TTIN', @next_worker_generator_pid
+            else
+              @next_worker_generator = WorkerGenerator.new phase: @phase,
+                                                           num_desired_workers: 1,
+                                                           options: @options,
+                                                           launcher: @launcher,
+                                                           events: @events
+              pid = fork { @next_worker_generator.run }
+
+              if !pid
+                log "! Complete inability to spawn new worker generator detected"
+                log "! Seppuku is the only choice."
+                exit! 1
+              end
+
+              debug "Spawned worker generator: #{pid}"
+
+              @next_worker_generator_pid = pid
+            end
+          end
+        end
+      end
+
+      wait_worker_generators
     end
 
     def run
@@ -428,35 +248,14 @@ module Puma
 
       log "* Process workers: #{@options[:workers]}"
 
-      before = Thread.list
+      log "* Phased restart available"
 
-      if preload?
-        log "* Preloading application"
-        load_and_bind
-
-        after = Thread.list
-
-        if after.size > before.size
-          threads = (after - before)
-          if threads.first.respond_to? :backtrace
-            log "! WARNING: Detected #{after.size-before.size} Thread(s) started in app boot:"
-            threads.each do |t|
-              log "! #{t.inspect} - #{t.backtrace ? t.backtrace.first : ''}"
-            end
-          else
-            log "! WARNING: Detected #{after.size-before.size} Thread(s) started in app boot"
-          end
-        end
-      else
-        log "* Phased restart available"
-
-        unless @launcher.config.app_configured?
-          error "No application configured, nothing to run"
-          exit 1
-        end
-
-        @launcher.binder.parse @options[:binds], self
+      unless @launcher.config.app_configured?
+        error "No application configured, nothing to run"
+        exit 1
       end
+
+      @launcher.binder.parse @options[:binds], self
 
       read, @wakeup = Puma::Util.pipe
 
@@ -489,7 +288,7 @@ module Puma
       @launcher.config.run_hooks :before_fork, nil
       GC.compact if GC.respond_to?(:compact)
 
-      spawn_workers
+      spawn_initial_worker_generator
 
       Signal.trap "SIGINT" do
         stop
@@ -507,46 +306,18 @@ module Puma
               @phased_restart = false
             end
 
-            check_workers force_check
+            check_worker_generators force_check
 
             force_check = false
 
-            res = IO.select([read], nil, nil, Const::WORKER_CHECK_INTERVAL)
-
-            if res
-              req = read.read_nonblock(1)
-
-              next if !req || req == "!"
-
-              result = read.gets
-              pid = result.to_i
-
-              if w = @workers.find { |x| x.pid == pid }
-                case req
-                when "b"
-                  w.boot!
-                  log "- Worker #{w.index} (pid: #{pid}) booted, phase: #{w.phase}"
-                  force_check = true
-                when "e"
-                  # external term, see worker method, Signal.trap "SIGTERM"
-                  w.instance_variable_set :@term, true
-                when "t"
-                  w.term unless w.term?
-                  force_check = true
-                when "p"
-                  w.ping!(result.sub(/^\d+/,'').chomp)
-                end
-              else
-                log "! Out-of-sync worker list, no #{pid} worker"
-              end
-            end
-
+            # TODO: check for messages from worker generators
+            sleep Const::WORKER_CHECK_INTERVAL
           rescue Interrupt
             @status = :stop
           end
         end
 
-        stop_workers unless @status == :halt
+        stop_worker_generators unless @status == :halt
       ensure
         @check_pipe.close
         @suicide_pipe.close
@@ -559,18 +330,28 @@ module Puma
 
     # loops thru @workers, removing workers that exited, and calling
     # `#term` if needed
-    def wait_workers
-      @workers.reject! do |w|
-        begin
-          if Process.wait(w.pid, Process::WNOHANG)
-            true
-          else
-            w.term if w.term?
-            nil
-          end
-        rescue Errno::ECHILD
-          true # child is already terminated
-        end
+    def wait_worker_generators
+      remove_current = begin
+                         if @current_worker_generator_pid && Process.wait(@current_worker_generator_pid, Process::WNOHANG)
+                           true
+                         end
+                       rescue Errno::ECHILD
+                         true # child is already terminated
+                       end
+      remove_next = begin
+                      if @next_worker_generator_pid && Process.wait(@next_worker_generator_pid, Process::WNOHANG)
+                        true
+                      end
+                    rescue Errno::ECHILD
+                      true # child is already terminated
+                    end
+      if remove_current
+        @current_worker_generator = @next_worker_generator
+        @current_worker_generator_pid = @next_worker_generator_pid
+        @next_worker_generator = @next_worker_generator_pid = nil
+      end
+      if remove_next
+        @next_worker_generator_pid = @next_worker_generator = nil
       end
     end
   end

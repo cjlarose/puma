@@ -128,7 +128,7 @@ module Puma
       end
     end
 
-    def load_and_bind
+    def load_application
       unless @launcher.config.app_configured?
         error "No application configured, nothing to run"
         exit 1
@@ -141,7 +141,10 @@ module Puma
         log "! Unable to load application: #{e.class}: #{e.message}"
         raise e
       end
+    end
 
+    def load_and_bind
+      load_application
       @launcher.binder.parse @options[:binds], self
     end
 
