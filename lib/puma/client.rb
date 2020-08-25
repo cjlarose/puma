@@ -43,7 +43,7 @@ module Puma
     include Puma::Const
     extend Forwardable
 
-    def initialize(io, env=nil)
+    def initialize(io, env=nil, &on_connection_released)
       @io = io
       @to_io = io.to_io
       @proto_env = env
@@ -74,6 +74,7 @@ module Puma
       @body_remain = 0
 
       @in_last_chunk = false
+      @on_connection_released = on_connection_released
     end
 
     attr_reader :env, :to_io, :body, :io, :timeout_at, :ready, :hijacked,
@@ -93,6 +94,7 @@ module Puma
     # into the env)
     def call
       @hijacked = true
+      @on_connection_released.call
       env[HIJACK_IO] ||= @io
     end
 
@@ -146,6 +148,8 @@ module Puma
       rescue IOError
         Thread.current.purge_interrupt_queue if Thread.current.respond_to? :purge_interrupt_queue
       end
+
+      @on_connection_released.call
     end
 
     def try_to_finish

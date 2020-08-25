@@ -153,10 +153,6 @@ module Puma
     # Add +work+ to the todo list for a Thread to pickup and process.
     def <<(work)
       @mutex.synchronize do
-        if @shutdown
-          raise "Unable to add work while shutting down"
-        end
-
         @todo << work
 
         if @waiting < @todo.size and @spawned < @max

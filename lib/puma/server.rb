@@ -89,6 +89,10 @@ module Puma
       @precheck_closing = true
 
       @requests_count = 0
+
+      @connections_in_flight = 0
+      @connection_released = ConditionVariable.new
+      @connections_in_flight_mutex = Mutex.new
     end
 
     attr_accessor :binder, :leak_stack_on_error, :early_hints
@@ -202,7 +206,11 @@ module Puma
           STDERR.puts e.backtrace
         end
 
-        client.close unless env['detach']
+        if env['detach']
+          connection_released
+        else
+          client.close
+        end
       end
 
       @events.fire :state, :running
@@ -233,7 +241,10 @@ module Puma
               else
                 begin
                   if io = sock.accept_nonblock
-                    client = Client.new io, nil
+                    client = Client.new io, nil do
+                      connection_released
+                    end
+                    connection_accepted
                     pool << client
                   end
                 rescue SystemCallError
@@ -365,6 +376,19 @@ module Puma
       end
     end
 
+    def connection_accepted
+      @connections_in_flight_mutex.synchronize do
+        @connections_in_flight += 1
+      end
+    end
+
+    def connection_released
+      @connections_in_flight_mutex.synchronize do
+        @connections_in_flight -= 1
+        @connection_released.signal
+      end
+    end
+
     def handle_servers
       begin
         check = @check
@@ -391,13 +415,16 @@ module Puma
               else
                 begin
                   if io = sock.accept_nonblock
-                    client = Client.new io, @binder.env(sock)
+                    client = Client.new io, @binder.env(sock) do
+                      connection_released
+                    end
                     if remote_addr_value
                       client.peerip = remote_addr_value
                     elsif remote_addr_header
                       client.remote_addr_header = remote_addr_header
                     end
 
+                    connection_accepted
                     pool << client
                     busy_threads = pool.wait_until_not_full
                     if busy_threads == 0
@@ -635,7 +662,10 @@ module Puma
       env = req.env
       client = req.io
 
-      return false if closed_socket?(client)
+      if closed_socket?(client)
+        connection_released
+        return false
+      end
 
       normalize_env env, req
 
@@ -961,7 +991,10 @@ module Puma
             begin
               if io = sock.accept_nonblock
                 count += 1
-                client = Client.new io, @binder.env(sock)
+                client = Client.new io, @binder.env(sock) do
+                  connection_released
+                end
+                connection_accepted
                 @thread_pool << client
               end
             rescue SystemCallError
@@ -976,12 +1009,30 @@ module Puma
         @binder.close
       end
 
-      if @thread_pool
-        if timeout = @options[:force_shutdown_after]
-          @thread_pool.shutdown timeout.to_i
-        else
-          @thread_pool.shutdown
+      timeout = @options[:force_shutdown_after] || -1
+
+      if timeout >= 0
+        start_time = Time.now
+        remaining_time = timeout
+
+        @connections_in_flight_mutex.synchronize do
+          while @connections_in_flight > 0 && remaining_time > 0
+            @connection_released.wait @connections_in_flight_mutex, [1, remaining_time].min
+            remaining_time = start_time + timeout - Time.now
+          end
         end
+
+        timeout = [remaining_time, 0].max
+      else
+        @connections_in_flight_mutex.synchronize do
+          while @connections_in_flight > 0
+            @connection_released.wait @connections_in_flight_mutex
+          end
+        end
+      end
+
+      if @thread_pool
+        @thread_pool.shutdown timeout.to_i
       end
     end
 
