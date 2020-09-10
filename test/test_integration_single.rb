@@ -1,3 +1,4 @@
+require 'securerandom'
 require_relative "helper"
 require_relative "helpers/integration"
 
@@ -8,6 +9,75 @@ class TestIntegrationSingle < TestIntegration
     skip_unless_signal_exist? :USR2
     _, new_reply = restart_server_and_listen("-q test/rackup/hello.ru")
     assert_equal "Hello World", new_reply
+  end
+
+  DARWIN = !!RUBY_PLATFORM[/darwin/]
+
+  # used with thread_run to define correct 'refused' errors
+  def thread_run_refused(unix: false)
+    if unix
+      [Errno::ENOENT, IOError]
+    else
+      DARWIN ? [Errno::ECONNREFUSED, Errno::EPIPE, EOFError] :
+        [Errno::ECONNREFUSED]
+    end
+  end
+
+  def connect
+    s = TCPSocket.new(HOST, @tcp_port)
+    @ios_to_close << s
+    message = SecureRandom.hex 8192
+    s << "GET / HTTP/1.1\r\nContent-Length: #{message.bytesize}\r\n\r\n#{message}"
+    true until s.gets == "\r\n"
+    s
+  end
+
+  def test_hot_restart_does_not_drop_connections
+    skip_unless_signal_exist? :USR2
+    refused = thread_run_refused
+    # start the server, wait 'til booted
+    cli_server "-q test/rackup/hello.ru"
+
+    replies = []
+    mutex = Mutex.new
+
+    # start up a bunch of clients, each hammering the server
+    threads = (0...10).map do
+      Thread.new do
+        50.times do
+          begin
+            s = connect
+            body = read_body(s, 20)
+            if body == "Hello World"
+              mutex.synchronize { replies << :success }
+            else
+              mutex.synchronize { replies << :unexpected_response }
+            end
+          rescue Errno::ECONNRESET
+            # connection was accepted but then closed
+            # client would see an empty response
+            mutex.synchronize { replies << :reset }
+          rescue *refused
+            mutex.synchronize { replies << :refused }
+          end
+        end
+      end
+    end
+
+    25.times do
+      Process.kill :USR2, @pid
+      wait_for_server_to_boot
+      sleep 1
+    end
+
+    threads.each(&:join)
+
+    counts = Hash[replies.group_by { |v| v }.map { |k, v| [k, v.size] }]
+
+    assert_nil counts[:unexpected_response]
+    assert_nil counts[:reset]
+    assert_nil counts[:refused]
+    assert_equal 500, counts[:success]
   end
 
   # It does not share environments between multiple generations, which would break Dotenv
