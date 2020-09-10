@@ -133,7 +133,9 @@ module Puma
 
       while true
         begin
+          STDERR.puts("Waiting for #{@sleep_for} seconds...")
           ready = selector.select @sleep_for
+          STDERR.puts("Ready!")
         rescue IOError => e
           Thread.current.purge_interrupt_queue if Thread.current.respond_to? :purge_interrupt_queue
           if monitors.any? { |mon| mon.value.closed? }
@@ -204,6 +206,27 @@ module Puma
                       true
                     end
                   end
+                when "?"
+                  # Close all of the idle connections
+                  # After we close the idle connections, then the ones that are currently still
+                  # running will automatically be closed because of how we set the "keep-alive"
+                  # header on the request to false, so reactor will be shutdown after that has
+                  # finished.
+                  STDERR.puts("deleting(timeouts: #{@timeouts.length}, monitors: #{@monitors.length}")
+                  monitors.reject! do |mon|
+                    if mon.value == @ready || mon.value == @trigger
+                      false
+                    else
+                      if mon.value.idle
+                        STDERR.puts('D')
+                        mon.value.close
+                        @selector.deregister mon.value
+                        @timeouts.delete mon
+                        true
+                      end
+                     end
+                    end
+                  STDERR.puts("deleted(timeouts: #{@timeouts.length}, monitors: #{@monitors.length}")
                 when "!"
                   return
                 end
@@ -224,6 +247,7 @@ module Puma
                 if c.try_to_finish
                   @app_pool << c
                   clear_monitor mon
+                  @timeouts.delete mon
                 end
 
               # Don't report these to the lowlevel_error handler, otherwise
@@ -271,6 +295,8 @@ module Puma
                 c.close
 
                 clear_monitor mon
+              ensure
+                c.idle = true
               end
             end
           end
@@ -286,6 +312,7 @@ module Puma
               c.write_error(408) if c.in_data_phase
               c.close
 
+              STDERR.puts('Killing timed out connection...')
               clear_monitor mon
 
               break if @timeouts.empty?
@@ -387,6 +414,14 @@ module Puma
     def clear!
       begin
         @trigger << "c"
+      rescue IOError
+        Thread.current.purge_interrupt_queue if Thread.current.respond_to? :purge_interrupt_queue
+      end
+    end
+
+    def graceful_shutdown
+      begin
+        @trigger << "?"
       rescue IOError
         Thread.current.purge_interrupt_queue if Thread.current.respond_to? :purge_interrupt_queue
       end

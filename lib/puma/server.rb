@@ -234,6 +234,7 @@ module Puma
             process_client client, buffer
           else
             client.set_timeout @first_data_timeout
+            STDERR.puts('new client\n')
             @reactor.add client
           end
         end
@@ -420,6 +421,11 @@ module Puma
               return unless @queue_requests
               close_socket = false
               client.set_timeout @persistent_timeout
+              if shutting_down?
+                STDERR.puts('get outta here\n')
+                return
+              end
+              STDERR.puts('redo client\n')
               @reactor.add client
               return
             end
@@ -894,6 +900,9 @@ module Puma
     # Wait for all outstanding requests to finish.
     #
     def graceful_shutdown
+      # start the graceful shutdown for the reactor
+      @reactor.graceful_shutdown
+
       if @options[:shutdown_debug]
         threads = Thread.list
         total = threads.size

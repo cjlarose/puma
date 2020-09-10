@@ -75,12 +75,14 @@ module Puma
 
       @in_last_chunk = false
       @on_connection_released = on_connection_released
+
+      @idle = true
     end
 
     attr_reader :env, :to_io, :body, :io, :timeout_at, :ready, :hijacked,
-                :tempfile
+                :tempfile, :idle
 
-    attr_writer :peerip
+    attr_writer :peerip, :idle
 
     attr_accessor :remote_addr_header
 
@@ -153,6 +155,8 @@ module Puma
     end
 
     def try_to_finish
+      @idle = true
+
       return read_body unless @read_header
 
       begin
@@ -543,6 +547,10 @@ module Puma
       end
       @requests_served += 1
       @ready = true
+    end
+
+    def idle?
+      false
     end
   end
 end

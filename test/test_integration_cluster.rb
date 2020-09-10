@@ -336,6 +336,9 @@ RUBY
     s = connect "sleep1", unix: unix
     replies << read_body(s)
 
+    Thread.new do
+      IO.copy_stream @server, STDOUT
+    end
     Process.kill :USR1, @pid
 
     refused = thread_run_refused unix: unix
