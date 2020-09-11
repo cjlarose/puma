@@ -155,7 +155,7 @@ module Puma
     end
 
     def try_to_finish
-      @idle = true
+      @idle = false
 
       return read_body unless @read_header
 
@@ -190,6 +190,8 @@ module Puma
       end
 
       false
+    ensure
+      @idle = true
     end
 
     if IS_JRUBY

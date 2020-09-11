@@ -53,6 +53,7 @@ module Puma
     # to do its work.
     #
     def initialize(app, events=Events.stdio, options={})
+      STDERR.puts('Server started!')
       @app = app
       @events = events
 
@@ -423,6 +424,7 @@ module Puma
               client.set_timeout @persistent_timeout
               if shutting_down?
                 STDERR.puts('get outta here\n')
+                close_socket = true
                 return
               end
               STDERR.puts('redo client\n')
@@ -949,29 +951,37 @@ module Puma
 
       timeout = @options[:force_shutdown_after] || -1
 
+      STDERR.puts("about to wait for #{@connections_in_flight} connections")
       if timeout >= 0
+        STDERR.puts('waiting with timeout')
         start_time = Time.now
         remaining_time = timeout
 
         @connections_in_flight_mutex.synchronize do
           while @connections_in_flight > 0 && remaining_time > 0
             @connection_released.wait @connections_in_flight_mutex, [1, remaining_time].min
+            STDERR.puts("There is #{@connections_in_flight} connections left")
             remaining_time = start_time + timeout - Time.now
           end
         end
 
         timeout = [remaining_time, 0].max
       else
+        STDERR.puts('waiting indefinite timeout')
         @connections_in_flight_mutex.synchronize do
           while @connections_in_flight > 0
             @connection_released.wait @connections_in_flight_mutex
+            STDERR.puts("There is #{@connections_in_flight} connections left")
           end
         end
       end
+      STDERR.puts('FINISHED WAITING!!!!!!')
 
       if @thread_pool
         @thread_pool.shutdown timeout.to_i
       end
+
+      STDERR.puts('SHUTDOWN!')
     end
 
     def notify_safely(message)

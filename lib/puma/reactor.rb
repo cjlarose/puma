@@ -207,26 +207,7 @@ module Puma
                     end
                   end
                 when "?"
-                  # Close all of the idle connections
-                  # After we close the idle connections, then the ones that are currently still
-                  # running will automatically be closed because of how we set the "keep-alive"
-                  # header on the request to false, so reactor will be shutdown after that has
-                  # finished.
-                  STDERR.puts("deleting(timeouts: #{@timeouts.length}, monitors: #{@monitors.length}")
-                  monitors.reject! do |mon|
-                    if mon.value == @ready || mon.value == @trigger
-                      false
-                    else
-                      if mon.value.idle
-                        STDERR.puts('D')
-                        mon.value.close
-                        @selector.deregister mon.value
-                        @timeouts.delete mon
-                        true
-                      end
-                     end
-                    end
-                  STDERR.puts("deleted(timeouts: #{@timeouts.length}, monitors: #{@monitors.length}")
+                  @shutdown = true
                 when "!"
                   return
                 end
@@ -247,7 +228,6 @@ module Puma
                 if c.try_to_finish
                   @app_pool << c
                   clear_monitor mon
-                  @timeouts.delete mon
                 end
 
               # Don't report these to the lowlevel_error handler, otherwise
@@ -295,19 +275,43 @@ module Puma
                 c.close
 
                 clear_monitor mon
-              ensure
-                c.idle = true
               end
             end
           end
         end
 
-        unless @timeouts.empty?
-          @mutex.synchronize do
-            now = Time.now
+        if @shutdown
+          # Close all of the idle connections
+          # After we close the idle connections, then the ones that are currently still
+          # running will automatically be closed because of how we set the "keep-alive"
+          # header on the request to false, so reactor will be shutdown after that has
+          # finished.
+          STDERR.puts("deleting(timeouts: #{@timeouts.length}, monitors: #{@monitors.length}")
+          monitors.reject! do |mon|
+            if mon.value == @ready || mon.value == @trigger
+              false
+            else
+              if mon.value.idle
+                STDERR.puts('D')
+                mon.value.close
+                @selector.deregister mon.value
+                @timeouts.delete mon
+                true
+              end
+            end
+          end
+          STDERR.puts("deleted(timeouts: #{@timeouts.length}, monitors: #{@monitors.length}")
+          if @timeouts.empty? && @monitors.length == 1
+            return
+          end
+        end
 
-            while @timeouts.first.value.timeout_at < now
-              mon = @timeouts.shift
+          unless @timeouts.empty?
+            @mutex.synchronize do
+              now = Time.now
+
+              while @timeouts.first.value.timeout_at < now
+                mon = @timeouts.shift
               c = mon.value
               c.write_error(408) if c.in_data_phase
               c.close
