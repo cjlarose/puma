@@ -548,9 +548,5 @@ module Puma
       @requests_served += 1
       @ready = true
     end
-
-    def idle?
-      false
-    end
   end
 end
