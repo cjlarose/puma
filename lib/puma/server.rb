@@ -233,13 +233,12 @@ module Puma
         else
           if process_now
             process_client client, buffer
+            client.idle = true
           else
             client.set_timeout @first_data_timeout
             STDERR.puts('new client\n')
             @reactor.add client
           end
-        ensure
-          client.idle = true
         end
 
         process_now
