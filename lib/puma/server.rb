@@ -238,6 +238,8 @@ module Puma
             STDERR.puts('new client\n')
             @reactor.add client
           end
+        ensure
+          client.idle = true
         end
 
         process_now

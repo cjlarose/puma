@@ -190,8 +190,6 @@ module Puma
       end
 
       false
-    ensure
-      @idle = true
     end
 
     if IS_JRUBY

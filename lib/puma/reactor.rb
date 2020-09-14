@@ -275,6 +275,8 @@ module Puma
                 c.close
 
                 clear_monitor mon
+              ensure
+                c.idle = true
               end
             end
           end
