@@ -12,6 +12,8 @@ gem "minitest-retry"
 gem "minitest-proveit"
 gem "minitest-stub-const"
 
+gem "pry-remote"
+
 gem "jruby-openssl", :platform => "jruby"
 
 gem "rubocop", "~> 0.58.0"

@@ -15,6 +15,8 @@ require 'puma/io_buffer'
 require 'socket'
 require 'forwardable'
 
+require 'pry-remote'
+
 module Puma
 
   # The HTTP Server itself. Serves out a single Rack app.
@@ -53,6 +55,10 @@ module Puma
     # to do its work.
     #
     def initialize(app, events=Events.stdio, options={})
+      # Thread.new do
+      #   binding.remote_pry
+      # end
+
       STDERR.puts('Server started!')
       @app = app
       @events = events
@@ -88,8 +94,11 @@ module Puma
       @requests_count = 0
 
       @connections_in_flight = 0
+      @connections_set = []
       @connection_released = ConditionVariable.new
       @connections_in_flight_mutex = Mutex.new
+
+      @shutdown_mutex = Mutex.new
     end
 
     attr_accessor :binder, :leak_stack_on_error, :early_hints
@@ -207,6 +216,7 @@ module Puma
         process_now = false
 
         begin
+          # client.idle = false
           if @queue_requests
             process_now = client.eagerly_finish
           else
@@ -231,13 +241,27 @@ module Puma
 
           @events.connection_error e, client
         else
-          if process_now
+          if process_now || !@queue_requests
             process_client client, buffer
-            client.idle = true
+            # client.idle = true
           else
-            client.set_timeout @first_data_timeout
-            STDERR.puts('new client\n')
-            @reactor.add client
+            block = proc do
+              if @queue_requests
+                client.set_timeout @first_data_timeout
+                STDERR.print('new client: ')
+                @reactor.add client
+              else
+                process_client client, buffer
+              end
+            end
+            # if shutting_down?
+              STDERR.puts('Shutdown mutex on thread pool processing!')
+              @shutdown_mutex.synchronize do
+                block.call
+              end
+            # else
+            #   block.call
+            # end
           end
         end
 
@@ -273,15 +297,17 @@ module Puma
       end
     end
 
-    def connection_accepted
+    def connection_accepted(c)
       @connections_in_flight_mutex.synchronize do
+        @connections_set.append c
         @connections_in_flight += 1
       end
     end
 
-    def connection_released
+    def connection_released(c)
       @connections_in_flight_mutex.synchronize do
         @connections_in_flight -= 1
+        @connections_set.delete c
         @connection_released.signal
       end
     end
@@ -315,20 +341,27 @@ module Puma
                 pool.wait_for_less_busy_worker(
                   @options[:wait_for_less_busy_worker].to_f)
 
+                STDERR.puts("New sock: #{sock}")
                 io = begin
                   sock.accept_nonblock
-                rescue IO::WaitReadable
+                 rescue IO::WaitReadable
+                   STDERR.puts("FAIL WAIT READABLE")
                   next
                 end
+                STDERR.puts("New io: #{io}")
                 client = Client.new io, @binder.env(sock) do
-                  connection_released
+                  connection_released client
                 end
+                STDERR.puts("New client: #{client}")
                 if remote_addr_value
                   client.peerip = remote_addr_value
                 elsif remote_addr_header
                   client.remote_addr_header = remote_addr_header
                 end
-                connection_accepted
+                connection_accepted client
+                if @status != :run
+                  STDERR.puts('IS THIS WHAT THE PROBLEM IS?')
+                end
                 pool << client
               end
             end
@@ -337,12 +370,17 @@ module Puma
           end
         end
 
+        STDERR.puts('OUT OF SERVER LOOP')
+
         @events.fire :state, @status
 
         if queue_requests
-          @queue_requests = false
+          @shutdown_mutex.synchronize do
+            @queue_requests = false
+          end
           @reactor.clear!
           @reactor.shutdown
+          STDERR.puts('Stopped blocking!')
         end
         graceful_shutdown if @status == :stop || @status == :restart
       rescue Exception => e
@@ -398,9 +436,16 @@ module Puma
         while true
           case handle_request(client, buffer)
           when false
+            # buffer.reset
+            # ThreadPool.clean_thread_locals if clean_thread_locals
+            # client.reset(false)
+            sleep(0.0001)
             return
           when :async
             close_socket = false
+            # buffer.reset
+            # ThreadPool.clean_thread_locals if clean_thread_locals
+            # client.reset(false)
             return
           when true
             buffer.reset
@@ -419,16 +464,16 @@ module Puma
               check_for_more_data = false
             end
 
+            # if shutting_down?
+            #   STDERR.puts('get outta here\n')
+            #   close_socket = true
+            #   return
+            # end
             unless client.reset(check_for_more_data)
               return unless @queue_requests
               close_socket = false
               client.set_timeout @persistent_timeout
-              if shutting_down?
-                STDERR.puts('get outta here\n')
-                close_socket = true
-                return
-              end
-              STDERR.puts('redo client\n')
+              STDERR.print('redo client: ')
               @reactor.add client
               return
             end
@@ -469,12 +514,16 @@ module Puma
       ensure
         buffer.reset
 
+        STDERR.print("Closing: (#{client.io.peeraddr[1]}) => ")
         begin
           client.close if close_socket
+          STDERR.puts("PASS")
         rescue IOError, SystemCallError
+          STDERR.puts("FAIL")
           Thread.current.purge_interrupt_queue if Thread.current.respond_to? :purge_interrupt_queue
           # Already closed
         rescue StandardError => e
+          STDERR.puts("FAIL")
           @events.unknown_error e, nil, "Client"
         end
       end
@@ -564,7 +613,7 @@ module Puma
       client = req.io
 
       if closed_socket?(client)
-        connection_released
+        connection_released client
         return false
       end
 
@@ -717,6 +766,7 @@ module Puma
           end
         end
 
+
         # regardless of what the client wants, we always close the connection
         # if running without request queueing
         keep_alive &&= @queue_requests
@@ -809,6 +859,8 @@ module Puma
         end
 
       ensure
+        STDERR.puts("Finished response to #{client.peeraddr[1]} (keep-alive: #{keep_alive})")
+
         uncork_socket client
 
         body.close
@@ -904,7 +956,7 @@ module Puma
     #
     def graceful_shutdown
       # start the graceful shutdown for the reactor
-      @reactor.graceful_shutdown
+      # @reactor.graceful_shutdown
 
       if @options[:shutdown_debug]
         threads = Thread.list
@@ -933,9 +985,9 @@ module Puma
               if io = sock.accept_nonblock
                 count += 1
                 client = Client.new io, @binder.env(sock) do
-                  connection_released
+                  connection_released client
                 end
-                connection_accepted
+                connection_accepted client
                 @thread_pool << client
               end
             rescue SystemCallError
@@ -952,30 +1004,32 @@ module Puma
 
       timeout = @options[:force_shutdown_after] || -1
 
-      STDERR.puts("about to wait for #{@connections_in_flight} connections")
-      if timeout >= 0
-        STDERR.puts('waiting with timeout')
-        start_time = Time.now
-        remaining_time = timeout
-
-        @connections_in_flight_mutex.synchronize do
-          while @connections_in_flight > 0 && remaining_time > 0
-            @connection_released.wait @connections_in_flight_mutex, [1, remaining_time].min
-            STDERR.puts("There is #{@connections_in_flight} connections left")
-            remaining_time = start_time + timeout - Time.now
-          end
-        end
-
-        timeout = [remaining_time, 0].max
-      else
-        STDERR.puts('waiting indefinite timeout')
-        @connections_in_flight_mutex.synchronize do
-          while @connections_in_flight > 0
-            @connection_released.wait @connections_in_flight_mutex
-            STDERR.puts("There is #{@connections_in_flight} connections left")
-          end
-        end
-      end
+      # STDERR.puts("about to wait for #{@connections_in_flight} connections")
+      # if timeout >= 0
+      #   STDERR.puts('waiting with timeout')
+      #   start_time = Time.now
+      #   remaining_time = timeout
+      #
+      #   @connections_in_flight_mutex.synchronize do
+      #     while @connections_in_flight > 0 && remaining_time > 0
+      #       @connection_released.wait @connections_in_flight_mutex, [1, remaining_time].min
+      #       # STDERR.puts("There is #{@connections_in_flight} connections left")
+      #       STDERR.puts("Waiting on #{@connections_set}") if @connections_in_flight < 4
+      #       remaining_time = start_time + timeout - Time.now
+      #     end
+      #   end
+      #
+      #   timeout = [remaining_time, 0].max
+      # else
+      #   STDERR.puts('waiting indefinite timeout')
+      #   @connections_in_flight_mutex.synchronize do
+      #     while @connections_in_flight > 0
+      #       @connection_released.wait @connections_in_flight_mutex
+      #       # STDERR.puts("There is #{@connections_in_flight} connections left")
+      #       STDERR.puts("Waiting on #{@connections_set}") if @connections_in_flight < 4
+      #     end
+      #   end
+      # end
       STDERR.puts('FINISHED WAITING!!!!!!')
 
       if @thread_pool
@@ -1007,16 +1061,19 @@ module Puma
     # off the request queue before finally exiting.
 
     def stop(sync=false)
+      STDERR.puts('SERVER: Received Stop Command')
       notify_safely(STOP_COMMAND)
       @thread.join if @thread && sync
     end
 
     def halt(sync=false)
+      STDERR.puts('SERVER: Received Halt Command')
       notify_safely(HALT_COMMAND)
       @thread.join if @thread && sync
     end
 
     def begin_restart(sync=false)
+      STDERR.puts('SERVER: Received Restart Command')
       notify_safely(RESTART_COMMAND)
       @thread.join if @thread && sync
     end

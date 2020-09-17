@@ -89,7 +89,11 @@ module Puma
     def_delegators :@io, :closed?
 
     def inspect
-      "#<Puma::Client:0x#{object_id.to_s(16)} @ready=#{@ready.inspect}>"
+      "#<Puma::Client:0x#{object_id.to_s(16)} @ready=#{@ready.inspect} @idle=#{can_close?} @io=#{@io.peeraddr&.[] 1}>"
+    end
+
+    def to_s
+      inspect
     end
 
     # For the hijack protocol (allows us to just put the Client object
@@ -151,12 +155,10 @@ module Puma
         Thread.current.purge_interrupt_queue if Thread.current.respond_to? :purge_interrupt_queue
       end
 
-      @on_connection_released.call
+      @on_connection_released.call self
     end
 
     def try_to_finish
-      @idle = false
-
       return read_body unless @read_header
 
       begin

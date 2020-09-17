@@ -137,9 +137,12 @@ module Puma
           end
 
           begin
+            work.idle = false
             @out_of_band_pending = true if block.call(work, *extra)
+            work.idle = true
           rescue Exception => e
             STDERR.puts "Error reached top of thread-pool: #{e.message} (#{e.class})"
+            STDERR.puts e.backtrace
           end
         end
       end
@@ -175,6 +178,10 @@ module Puma
     # Add +work+ to the todo list for a Thread to pickup and process.
     def <<(work)
       with_mutex do
+        if @shutdown
+          STDERR.print('WOULDA FAILED!!!!!! => ')
+        end
+        STDERR.puts("THREAD POOL ADD: #{work}")
         @todo << work
 
         if @waiting < @todo.size and @spawned < @max
@@ -322,6 +329,7 @@ module Puma
     def shutdown(timeout=-1)
       threads = with_mutex do
         @shutdown = true
+        STDERR.puts('THREAD POOL SHUTDOWN STARTED')
         @trim_requested = @spawned
         @not_empty.broadcast
         @not_full.broadcast

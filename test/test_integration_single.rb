@@ -49,16 +49,28 @@ class TestIntegrationSingle < TestIntegration
             s = connect
             body = read_body(s, 20)
             if body == "Hello World"
-              mutex.synchronize { replies << :success }
+              mutex.synchronize {
+                STDERR.puts("Response Received: Success (#{s.addr[1]})")
+                replies << :success
+              }
             else
-              mutex.synchronize { replies << :unexpected_response }
+              mutex.synchronize {
+                STDERR.puts("Response Received: Unexpected (#{s})")
+                replies << :unexpected_response
+              }
             end
           rescue Errno::ECONNRESET
             # connection was accepted but then closed
             # client would see an empty response
-            mutex.synchronize { replies << :reset }
+            mutex.synchronize {
+              STDERR.puts("Response Received: Reset (#{s&.addr&.[] 1})")
+              replies << :reset
+            }
           rescue *refused
-            mutex.synchronize { replies << :refused }
+            mutex.synchronize {
+              STDERR.puts("Response Received: Refused (#{s})")
+              replies << :refused
+            }
           end
         end
       end

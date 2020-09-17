@@ -3,6 +3,8 @@
 require 'puma/util'
 require 'puma/minissl' if ::Puma::HAS_SSL
 
+require 'pry-remote'
+
 require 'nio'
 
 module Puma
@@ -133,9 +135,9 @@ module Puma
 
       while true
         begin
-          STDERR.puts("Waiting for #{@sleep_for} seconds...")
+          # STDERR.puts("Waiting for #{@sleep_for} seconds...")
           ready = selector.select @sleep_for
-          STDERR.puts("Ready!")
+          # STDERR.puts("Ready!")
         rescue IOError => e
           Thread.current.purge_interrupt_queue if Thread.current.respond_to? :purge_interrupt_queue
           if monitors.any? { |mon| mon.value.closed? }
@@ -187,11 +189,13 @@ module Puma
                   @timeouts.sort! { |a,b| a.value.timeout_at <=> b.value.timeout_at }
                   calculate_sleep
                 when "c"
+                  STDERR.print('Cleared: [')
                   monitors.reject! do |submon|
                     if submon.value == @ready
                       false
                     else
                       if submon.value.can_close?
+                        STDERR.print("#{submon.value.io.peeraddr[1]}, ")
                         submon.value.close
                       else
                         # Pass remaining open client connections to the thread pool.
@@ -206,7 +210,10 @@ module Puma
                       true
                     end
                   end
+                  STDERR.puts(']')
+                  STDERR.flush
                 when "?"
+                  STDERR.puts('REACTOR SHUTDOWN!')
                   @shutdown = true
                 when "!"
                   return
@@ -293,8 +300,7 @@ module Puma
             if mon.value == @ready || mon.value == @trigger
               false
             else
-              if mon.value.idle
-                STDERR.puts('D')
+              if mon.value.can_close?
                 mon.value.close
                 @selector.deregister mon.value
                 @timeouts.delete mon
@@ -328,6 +334,12 @@ module Puma
           end
         end
       end
+    ensure
+      STDERR.puts('REACTOR HAS GIVEN UP')
+      STDERR.puts("Reactor still has: #{@monitors}")
+      # @reactor_shutdown_mutex.synchronize do
+      #   @reactor_shutdown.signal
+      # end
     end
 
     def clear_monitor(mon)
@@ -411,6 +423,10 @@ module Puma
     # array. Then a value to sleep for is derived in the call to `calculate_sleep`
     def add(c)
       @mutex.synchronize do
+        # if @shutdown
+        #   raise "Can't add to the reactor while shutting down?"
+        # end
+        STDERR.puts("REACTOR ADD: #{c}")
         @input << c
         @trigger << "*"
       end
@@ -418,6 +434,7 @@ module Puma
 
     # Close all watched sockets and clear them from being watched
     def clear!
+      STDERR.puts('sending clear command to reactor')
       begin
         @trigger << "c"
       rescue IOError
@@ -426,6 +443,7 @@ module Puma
     end
 
     def graceful_shutdown
+      STDERR.puts('sending graceful shutdown command to reactor')
       begin
         @trigger << "?"
       rescue IOError
@@ -434,13 +452,22 @@ module Puma
     end
 
     def shutdown
+      STDERR.puts('sending HARD shutdown command to reactor')
       begin
         @trigger << "!"
+        # @reactor_shutdown = ConditionVariable.new
+        # @reactor_shutdown_mutex = Mutex.new
       rescue IOError
         Thread.current.purge_interrupt_queue if Thread.current.respond_to? :purge_interrupt_queue
       end
 
       @thread.join
+
+      # @reactor_shutdown_mutex.synchronize do
+      #   @reactor_shutdown.wait @reactor_shutdown_mutex
+      # end
+    ensure
+      STDERR.puts('REACTOR actually finished for sure')
     end
   end
 end
