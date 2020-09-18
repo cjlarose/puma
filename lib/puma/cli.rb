@@ -80,6 +80,10 @@ module Puma
       @launcher.run
     end
 
+    def run_worker(master_pid, ios:)
+      @launcher.run_worker master_pid, ios: ios
+    end
+
     private
     def unsupported(str)
       @events.error(str)

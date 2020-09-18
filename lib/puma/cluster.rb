@@ -163,7 +163,35 @@ module Puma
     def spawn_worker(idx, master)
       @launcher.config.run_hooks :before_worker_fork, idx, @launcher.events
 
-      pid = fork { worker(idx, master) }
+      pid = if @options[:fork_worker] && idx == 0
+              file_descriptors = {
+                master_read: @master_read.fileno,
+                suicide_pipe: @suicide_pipe.fileno,
+                fork_writer: @fork_writer.fileno,
+                check_pipe: @check_pipe.fileno,
+                worker_write: @worker_write.fileno,
+                fork_pipe: @fork_pipe.fileno,
+              }
+
+              script = <<-RUBY
+                original_argv = #{@launcher.original_argv.inspect}
+                master_pid = #{master}
+                ios = Hash[#{file_descriptors}.map { |k, v| [k, IO.for_fd(v)] }]
+
+                require 'bundler/setup'
+                require 'puma/cli'
+
+                cli = Puma::CLI.new original_argv
+                cli.run_worker master_pid, ios: ios
+              RUBY
+
+              env = @launcher.binder.redirects_for_restart_env
+              pipe_map = Hash[file_descriptors.map { |_, v| [v, v] }]
+              binds_map = @launcher.binder.redirects_for_restart
+              Kernel.spawn env, Gem.ruby, '-e', script, pipe_map.merge(binds_map)
+            else
+              fork { worker(idx, master) }
+            end
       if !pid
         log "! Complete inability to spawn new workers detected"
         log "! Seppuku is the only choice."
@@ -242,7 +270,7 @@ module Puma
       end
     end
 
-    def worker(index, master)
+    def worker(index, master, ios: nil)
       title  = "puma: cluster worker #{index}: #{master}"
       title += " [#{@options[:tag]}]" if @options[:tag] && !@options[:tag].empty?
       $0 = title
@@ -251,6 +279,17 @@ module Puma
       Signal.trap "SIGCHLD", "DEFAULT"
 
       fork_worker = @options[:fork_worker] && index == 0
+
+      if fork_worker
+        @launcher.binder.parse @options[:binds], self
+
+        @master_read = ios[:master_read]
+        @suicide_pipe = ios[:suicide_pipe]
+        @fork_writer = ios[:fork_writer]
+        @check_pipe = ios[:check_pipe]
+        @worker_write = ios[:worker_write]
+        @fork_pipe = ios[:fork_pipe]
+      end
 
       @workers = []
       if !@options[:fork_worker] || fork_worker

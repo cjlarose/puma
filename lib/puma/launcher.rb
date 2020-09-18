@@ -89,7 +89,7 @@ module Puma
       @status = :run
     end
 
-    attr_reader :binder, :events, :config, :options, :restart_dir
+    attr_reader :binder, :events, :config, :options, :restart_dir, :original_argv
 
     # Return stats about the server
     def stats
@@ -185,6 +185,10 @@ module Puma
         # nothing
       end
       close_binder_listeners unless @status == :restart
+    end
+
+    def run_worker(master_pid, ios:)
+      @runner.worker 0, master_pid, ios: ios
     end
 
     # Return all tcp ports the launcher may be using, TCP or SSL
