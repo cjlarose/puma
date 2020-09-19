@@ -177,6 +177,7 @@ module Puma
                 original_argv = #{@launcher.original_argv.inspect}
                 master_pid = #{master}
                 ios = Hash[#{file_descriptors}.map { |k, v| [k, IO.for_fd(v)] }]
+                ios[:worker_write].sync = true
 
                 require 'bundler/setup'
                 require 'puma/cli'
