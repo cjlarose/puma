@@ -10,6 +10,10 @@ class TestPlugin < TestIntegration
     Dir.mkdir("tmp") unless Dir.exist?("tmp")
 
     cli_server "-b tcp://#{HOST}:#{@tcp_bind} --control-url tcp://#{HOST}:#{@tcp_ctrl} --control-token #{TOKEN} -C test/config/plugin1.rb test/rackup/hello.ru"
+    tmp_file = Tempfile.new 'newserver'
+    Process.spawn "tee #{tmp_file.path}", in: @server, out: STDOUT
+    @server = tmp_file
+
     File.open('tmp/restart.txt', mode: 'wb') { |f| f.puts "Restart #{Time.now}" }
 
     true while (l = @server.gets) !~ /Restarting\.\.\./
