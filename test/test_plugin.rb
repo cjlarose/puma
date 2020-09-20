@@ -16,17 +16,22 @@ class TestPlugin < TestIntegration
 
     File.open('tmp/restart.txt', mode: 'wb') { |f| f.puts "Restart #{Time.now}" }
 
+    puts "[test_plugin] waiting for Restarting"
     true while (l = @server.gets) !~ /Restarting\.\.\./
     assert_match(/Restarting\.\.\./, l)
 
+    puts "[test_plugin] waiting for Ctrl-C"
     true while (l = @server.gets) !~ /Ctrl-C/
     assert_match(/Ctrl-C/, l)
 
     out = StringIO.new
 
+    puts "[test_plugin] sending stop"
     cli_pumactl "-C tcp://#{HOST}:#{@tcp_ctrl} -T #{TOKEN} stop"
+    puts "[test_plugin] waiting for Goodbye"
     true while (l = @server.gets) !~ /Goodbye/
 
+    puts "[test_plugin] closing server stream"
     @server.close
     @server = nil
     out.close
