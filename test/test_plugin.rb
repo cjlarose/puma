@@ -17,7 +17,13 @@ class TestPlugin < TestIntegration
     File.open('tmp/restart.txt', mode: 'wb') { |f| f.puts "Restart #{Time.now}" }
 
     puts "[test_plugin] waiting for Restarting"
-    true while (l = @server.gets) !~ /Restarting\.\.\./
+    l = nil
+    puts "[test_plugin] sep: #{$/.inspect}"
+    while true
+      l = @server.gets
+      puts "[test_plugin] Received #{l.inspect}" if l
+      break if l =~ /Restarting\.\.\./
+    end
     assert_match(/Restarting\.\.\./, l)
 
     puts "[test_plugin] waiting for Ctrl-C"
