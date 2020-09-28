@@ -143,6 +143,10 @@ module Puma
     end
 
     def close
+      if @io.respond_to? :shutdown
+        @io.shutdown(Socket::SHUT_WR) rescue nil
+      end
+
       begin
         @io.close
       rescue IOError
