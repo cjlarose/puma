@@ -157,55 +157,57 @@ module Puma
           ready.each do |mon|
             if mon.value == @ready
               @mutex.synchronize do
-                case @ready.read(1)
-                when "*"
-                  @input.each do |c|
-                    mon = nil
-                    begin
+                while message = @ready.read(1)
+                  case message
+                  when "*"
+                    @input.each do |c|
+                      mon = nil
                       begin
-                        mon = selector.register(c, :r)
-                      rescue ArgumentError
-                        # There is a bug where we seem to be registering an already registered
-                        # client. This code deals with this situation but I wish we didn't have to.
-                        monitors.delete_if { |submon| submon.value.to_io == c.to_io }
-                        selector.deregister(c)
-                        mon = selector.register(c, :r)
-                      end
-                    rescue IOError
-                      # Means that the io is closed, so we should ignore this request
-                      # entirely
-                    else
-                      mon.value = c
-                      @timeouts << mon if c.timeout_at
-                      monitors << mon
-                    end
-                  end
-                  @input.clear
-
-                  @timeouts.sort! { |a,b| a.value.timeout_at <=> b.value.timeout_at }
-                  calculate_sleep
-                when "c"
-                  monitors.reject! do |submon|
-                    if submon.value == @ready
-                      false
-                    else
-                      if submon.value.can_close?
-                        submon.value.close
-                      else
-                        # Pass remaining open client connections to the thread pool.
-                        @app_pool << submon.value
-                      end
-                      begin
-                        selector.deregister submon.value
+                        begin
+                          mon = selector.register(c, :r)
+                        rescue ArgumentError
+                          # There is a bug where we seem to be registering an already registered
+                          # client. This code deals with this situation but I wish we didn't have to.
+                          monitors.delete_if { |submon| submon.value.to_io == c.to_io }
+                          selector.deregister(c)
+                          mon = selector.register(c, :r)
+                        end
                       rescue IOError
-                        # nio4r on jruby seems to throw an IOError here if the IO is closed, so
-                        # we need to swallow it.
+                        # Means that the io is closed, so we should ignore this request
+                        # entirely
+                      else
+                        mon.value = c
+                        @timeouts << mon if c.timeout_at
+                        monitors << mon
                       end
-                      true
                     end
+                    @input.clear
+
+                    @timeouts.sort! { |a,b| a.value.timeout_at <=> b.value.timeout_at }
+                    calculate_sleep
+                  when "c"
+                    monitors.reject! do |submon|
+                      if submon.value == @ready
+                        false
+                      else
+                        if submon.value.can_close?
+                          submon.value.close
+                        else
+                          # Pass remaining open client connections to the thread pool.
+                          @app_pool << submon.value
+                        end
+                        begin
+                          selector.deregister submon.value
+                        rescue IOError
+                          # nio4r on jruby seems to throw an IOError here if the IO is closed, so
+                          # we need to swallow it.
+                        end
+                        true
+                      end
+                    end
+                  when "!"
+                    return
                   end
-                when "!"
-                  return
                 end
               end
             else
