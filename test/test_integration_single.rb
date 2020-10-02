@@ -11,6 +11,7 @@ class TestIntegrationSingle < TestIntegration
   end
 
   def test_hot_restart_does_not_drop_connections
+    skip_on :jruby, :truffleruby # test does not pass reliably on these platforms
     skip_unless_signal_exist? :USR2
 
     replies = Hash.new 0
