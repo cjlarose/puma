@@ -148,6 +148,14 @@ module Puma
     end
 
     def close
+      if @io.respond_to? :shutdown
+        begin
+          @io.shutdown Socket::SHUT_WR
+        rescue Errno::ENOTCONN
+          # ignore; the client is already disconnected
+        end
+      end
+
       begin
         @io.close
       rescue IOError
