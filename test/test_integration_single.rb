@@ -38,6 +38,8 @@ class TestIntegrationSingle < TestIntegration
           else
             replies[:unexpected_response] += 1
           end
+        rescue Timeout::Error
+          replies[:timeout] += 1
         rescue Errno::ECONNRESET
           # connection was accepted but then closed
           # client would see an empty response
@@ -63,6 +65,7 @@ class TestIntegrationSingle < TestIntegration
     restart_thread.join
 
     assert_equal 0, replies[:unexpected_response], "Unexpected response"
+    assert_equal 0, replies[:timeout], "Unexpected timeout"
     assert_equal 0, replies[:reset], "Expected no reset errors"
     assert_equal 0, replies[:refused], "Expected no refused connections"
     assert_equal num_requests, replies[:success]
