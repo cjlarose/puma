@@ -19,23 +19,22 @@ class TestIntegrationSingle < TestIntegration
     skip "Undiagnosed failures on Ruby 2.2" if RUBY_VERSION < '2.3'
 
     replies = Hash.new 0
-    num_requests = 500
+    client_thread_duration = 30 # seconds
     refused = thread_run_refused unix: false
     message = 'A' * 2**14
 
     cli_server "-q test/rackup/hello.ru"
 
     client_thread = Thread.new do
-      num_requests.times do
+      start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      while Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time < client_thread_duration
         begin
           socket = TCPSocket.new(HOST, @tcp_port)
           @ios_to_close << socket
           socket << "POST / HTTP/1.1\r\nContent-Length: #{message.bytesize}\r\n\r\n#{message}"
           true until socket.gets == "\r\n"
           body = read_body(socket, 20)
-          if body == "Hello World"
-            replies[:success] += 1
-          else
+          if body != "Hello World"
             replies[:unexpected_response] += 1
           end
         rescue Timeout::Error
@@ -68,7 +67,6 @@ class TestIntegrationSingle < TestIntegration
     assert_equal 0, replies[:timeout], "Unexpected timeout"
     assert_equal 0, replies[:reset], "Expected no reset errors"
     assert_equal 0, replies[:refused], "Expected no refused connections"
-    assert_equal num_requests, replies[:success]
   end
 
   # It does not share environments between multiple generations, which would break Dotenv
