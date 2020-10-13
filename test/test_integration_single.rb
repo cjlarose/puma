@@ -6,12 +6,16 @@ class TestIntegrationSingle < TestIntegration
 
   def workers ; 0 ; end
 
-  def test_hot_restart_does_not_drop_connections_threads
-    hot_restart_does_not_drop_connections num_threads: 5, total_requests: 1_000
+  100.times do |i|
+    define_method "test_hot_restart_does_not_drop_connections_threads_#{i}" do
+      hot_restart_does_not_drop_connections num_threads: 5, total_requests: 1_000
+    end
   end
 
-  def test_hot_restart_does_not_drop_connections
-    hot_restart_does_not_drop_connections
+  100.times do |i|
+    define_method "test_hot_restart_does_not_drop_connections_#{i}" do
+      hot_restart_does_not_drop_connections
+    end
   end
 
   def test_usr2_restart

@@ -16,12 +16,16 @@ class TestIntegrationCluster < TestIntegration
     super
   end
 
-  def test_hot_restart_does_not_drop_connections_threads
-    hot_restart_does_not_drop_connections num_threads: 10, total_requests: 3_000
+  100.times do |i|
+    define_method "test_hot_restart_does_not_drop_connections_threads_#{i}" do
+      hot_restart_does_not_drop_connections num_threads: 10, total_requests: 3_000
+    end
   end
 
-  def test_hot_restart_does_not_drop_connections
-    hot_restart_does_not_drop_connections num_threads: 1, total_requests: 1_000
+  100.times do |i|
+    define_method "test_hot_restart_does_not_drop_connections_threads_#{i}" do
+      hot_restart_does_not_drop_connections num_threads: 1, total_requests: 1_000
+    end
   end
 
   def test_pre_existing_unix
