@@ -1,4 +1,4 @@
 source "https://rubygems.org"
 
 gem 'puma', path: '../../..'
-gem 'json', '= 2.3.1'
+gem 'json', '= 2.3.0'
